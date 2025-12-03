@@ -1,3 +1,722 @@
+
+// =================================================================
+// Parceiro de Programação: SCRIPT FINAL (V51.1 - IFRAME PROOF + DRAG MELHORADO)
+// Mudanças: apenas a função de arraste (setupGPUDrag) foi substituída por V51.1.
+// =================================================================
+
+(function() {
+
+    // --- INÍCIO: KILL SWITCH ---
+    try {
+        const ids = ['pausa-script-container', 'pausa-script-config-container', 'pausa-script-drag-overlay'];
+        ids.forEach(id => { const el = document.getElementById(id); if(el) el.remove(); });
+    } catch (e) { console.warn(e); }
+    // --- FIM: KILL SWITCH ---
+
+    // ----------------------------------------------------
+    // CONSTANTES E CONFIGURAÇÕES
+    // ----------------------------------------------------
+    const SELECTORES = {
+        MENU_STATUS_TOGGLE: '#toggleUserDropdownTarget',
+        DISPONIVEL: 'button.presence-available',
+        REFEICAO: 'button.presence-meal',
+        INTERVALO_MENU: 'button.presence-break', 
+        OCUPADO_MENU: 'button.presence-busy',   
+        LOGOFF: 'span.menu-label', 
+        NA_FILA_TOGGLE_HOST: 'gux-toggle#command-bar-queue-toggle', 
+        NA_FILA_DIRETO: 'gux-button.onQueueButton',
+        VOLTAR_SUBMENU: 'button[title="Volte às presenças primárias"]',
+        STATUS_LABEL_TEXT: 'span.presence-label-text', 
+        TREINAMENTO: 'button.presence-training',
+        REUNIAO: 'button.presence-meeting',
+    };
+
+    const PAUSAS_AGENDADAS_DEFAULT = [
+        { hora: "17:40", status: "Na fila" }, { hora: "18:35", status: "Pausa out" },
+        { hora: "18:40", status: "Pausa auricular" }, { hora: "18:50", status: "Na fila" },
+        { hora: "19:45", status: "Pausa out" }, { hora: "19:50", status: "Refeição" },
+        { hora: "20:10", status: "Na fila" }, { hora: "22:25", status: "Pausa out" },
+        { hora: "22:30", status: "Pausa auricular" }, { hora: "22:40", status: "Na fila" },
+        { hora: "00:00", status: "Logoff" }
+    ];
+
+    let estadoAtual = { tipo: 'Disponível', inicio: new Date(), ativa: false };
+    let historicoPausas = [];
+    let isAgendamentoAtivo = false;
+    let schedulerInterval = null;
+    let syncTimeout = null;
+    let ultimoEventoProcessado = null;
+    let isConfigPainelAberto = false;
+    let isAutomacaoPausada = false;
+    
+    // Variável para distinguir clique de arraste
+    let globalWasDragging = false; 
+
+    const STORAGE_KEY_HORARIOS = 'gerenciadorPausas_horarios';
+    const STORAGE_KEY_POS_MAIN = 'gerenciadorPausas_posMain';
+    const STORAGE_KEY_POS_CONFIG = 'gerenciadorPausas_posConfig';
+    const STORAGE_KEY_NOTIF_CONFIG = 'gerenciadorPausas_notifConfig';
+
+    const NOTIF_CONFIG_DEFAULT = { ativadas: true, somAtivado: false, antecedenciaSegundos: 15 };
+    let configNotificacao = { ...NOTIF_CONFIG_DEFAULT };
+    const SOM_NOTIFICACAO_URL = 'https://www.soundjay.com/button/sounds/beep-07a.mp3';
+    let audioNotificacao = new Audio(SOM_NOTIFICACAO_URL);
+    let audioDesbloqueado = false;
+
+    // --- Funções de LocalStorage ---
+    function salvarHorariosLocalStorage(h){try{localStorage.setItem(STORAGE_KEY_HORARIOS,JSON.stringify(h))}catch(e){}}
+    function carregarHorariosLocalStorage(){try{const h=localStorage.getItem(STORAGE_KEY_HORARIOS);if(h){const p=JSON.parse(h);if(Array.isArray(p))return p;}}catch(e){}return[...PAUSAS_AGENDADAS_DEFAULT]}
+    function salvarPosicaoPainelLocalStorage(k,el){if(!el)return;try{let p={};if(el.style.top&&el.style.left){p={top:el.style.top,left:el.style.left}}else{const r=el.getBoundingClientRect();p={bottom:'30px',right:'30px'}}localStorage.setItem(k,JSON.stringify(p))}catch(e){}}
+    function carregarPosicaoPainelLocalStorage(k){try{const pS=localStorage.getItem(k);if(pS)return JSON.parse(pS)}catch(e){}return null}
+    function salvarConfiguracoesNotificacaoLocalStorage(c){try{localStorage.setItem(STORAGE_KEY_NOTIF_CONFIG,JSON.stringify(c))}catch(e){}}
+    function carregarConfiguracoesNotificacaoLocalStorage(){try{const cS=localStorage.getItem(STORAGE_KEY_NOTIF_CONFIG);if(cS)return{...NOTIF_CONFIG_DEFAULT,...JSON.parse(cS)}}catch(e){}return{...NOTIF_CONFIG_DEFAULT}}
+    
+    let PAUSAS_AGENDADAS=carregarHorariosLocalStorage();
+    configNotificacao = carregarConfiguracoesNotificacaoLocalStorage();
+
+    // ----------------------------------------------------
+    // FUNÇÕES DE UTILIDADE E INTERAÇÃO
+    // ----------------------------------------------------
+    function tocarSomNotificacao(){if(!configNotificacao.somAtivado)return;if(!audioDesbloqueado){desbloquearAudio(true);return}audioNotificacao.currentTime=0;audioNotificacao.play().catch(e=>{})}
+    function desbloquearAudio(forcePlay=!1){if(audioDesbloqueado&&!forcePlay)return;let p=audioNotificacao.play();if(p!==undefined){p.then(()=>{audioNotificacao.pause();audioNotificacao.currentTime=0;if(!audioDesbloqueado){audioDesbloqueado=!0}}).catch(e=>{});}if(audioDesbloqueado){document.removeEventListener('click',desbloquearAudio)}}
+    async function mostrarNotificacao(evento){if(!configNotificacao.ativadas)return;if(!("Notification"in window))return;let p=Notification.permission;if(p==="granted"){tocarSomNotificacao();new Notification("Gerenciador",{body:`${evento.status} às ${evento.hora}`,tag:`gdp-${evento.hora}`})}else if(p==="default"){try{p=await Notification.requestPermission();if(p==="granted")mostrarNotificacao(evento)}catch(e){}}}
+    
+    function clicarElemento(s, t = null) {
+        let e = null;
+        if (t) {
+            const l = document.querySelectorAll(s); 
+            for (const o of l) {
+                if (o.textContent.trim().toLowerCase() === t.toLowerCase()) {
+                    e = o;
+                    while (e && e.parentElement && e.tagName !== 'BUTTON') e = e.parentElement;
+                    if (e && e.tagName === 'BUTTON') break; 
+                    e = null;
+                }
+            }
+        } else { e = document.querySelector(s); }
+        
+        if (e) {
+            const c = new MouseEvent('click', { view: window, bubbles: true, cancelable: true });
+            e.dispatchEvent(c);
+            return true;
+        }
+        return false;
+    }
+    
+    function clicarVoltarSubmenu(){if(clicarElemento(SELECTORES.VOLTAR_SUBMENU))return!0;return!1}
+    function formatarDuracao(s){const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),c=Math.max(0,s%60);const p=n=>String(n).padStart(2,'0');return`${p(h)}:${p(m)}:${p(c)}`}
+    function converterDuracaoParaSegundos(d){if(!d||typeof d!=='string')return 0;const p=d.split(':');if(p.length!==3)return 0;const h=parseInt(p[0],10)||0,m=parseInt(p[1],10)||0,s=parseInt(p[2],10)||0;return(h*3600)+(m*60)+s}
+    
+    function registrarPausa(n){
+        const a=new Date;
+        if(estadoAtual.ativa){
+            const f=a; const d=f.getTime()-estadoAtual.inicio.getTime();
+            if(d>500){ 
+                historicoPausas.push({
+                    tipo:estadoAtual.tipo,
+                    inicio:estadoAtual.inicio.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit',second:'2-digit'}),
+                    fim:f.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit',second:'2-digit'}),
+                    duracao:formatarDuracao(Math.round(d/1000))
+                });
+                renderizarHistoricoLog(); renderizarEstatisticas();
+            }
+        } 
+        estadoAtual={ tipo:n, inicio:a, ativa: (n !== 'Logoff') };
+        atualizarUI();
+    }
+    
+    function adicionarAtalho(){document.addEventListener('keydown',function(e){const c=e.ctrlKey||e.metaKey,s=e.shiftKey,o=e.key==='1';if(document.activeElement&&['INPUT','TEXTAREA'].includes(document.activeElement.tagName))return;if(c&&s&&o){e.preventDefault();toggleVisibilidade()}})}
+
+    // --- Agendamento ---
+    function mapearEexecutarAcao(s){
+        console.log(`[AGENDAMENTO] Ação Automática: ${s}`);
+        const status = s.toLowerCase().trim();
+        switch(status){
+            case"na fila": iniciarNaFila(true); break;
+            case"disponível": voltarDisponivel(true); break;
+            case"pausa out": iniciarPausaOut(true); break;
+            case"pausa auricular": 
+            case"pausa pessoal":
+            case"descanso": iniciarDescanso(true); break;
+            case"refeição": iniciarRefeicao(true); break;
+            case"treinamento": iniciarTreinamento(true); break;
+            case"reunião": iniciarReuniao(true); break;
+            case"logoff": realizarLogoff(true); break;
+            case"atividade backoffice":
+            case"ativ. backoffice":
+            case"backoffice": iniciarBackoffice(true); break;
+            case"feedback": iniciarFeedback(true); break;
+            case"particular": iniciarParticular(true); break;
+            case"questões de saúde":
+            case"saúde":
+            case"saude": iniciarQuestoesSaude(true); break;
+            default: console.warn(`Status '${s}' desconhecido.`);
+        }
+    }
+    
+    function verificarEExecutarAgendamentos(){if(!isAgendamentoAtivo||isAutomacaoPausada)return; const a=new Date,h=`${String(a.getHours()).padStart(2,'0')}:${String(a.getMinutes()).padStart(2,'0')}`,s=a.getSeconds(); Object.keys(window).forEach(k=>{if(k.startsWith('notif_')){const e=k.split('_')[1];if(e<h){clearTimeout(window[k]);delete window[k];}}}); const eA=PAUSAS_AGENDADAS.find(p=>p.hora===h);if(eA && ultimoEventoProcessado !== h){mapearEexecutarAcao(eA.status);ultimoEventoProcessado = h;if(eA.status.toLowerCase()==='logoff'){setTimeout(()=>{if(isAgendamentoAtivo)toggleAgendamento()},500)}return} if(!eA && ultimoEventoProcessado) { ultimoEventoProcessado = null; } if (s < 15) {const pM=new Date(a.getTime()+6e4),hP=`${String(pM.getHours()).padStart(2,'0')}:${String(pM.getMinutes()).padStart(2,'0')}`;const eP=PAUSAS_AGENDADAS.find(p=>p.hora===hP);if(eP){const antecedencia = configNotificacao.antecedenciaSegundos; const sN=Math.max(0,(60-antecedencia)-s),tId=`notif_${eP.hora}_${eP.status}`;if(sN>0&&!window[tId]){window[tId]=setTimeout(()=>{mostrarNotificacao(eP);delete window[tId]},sN*1e3)}}}}
+    function iniciarSchedulerSincronizado(){if(!isAgendamentoAtivo)return; verificarEExecutarAgendamentos();schedulerInterval=setInterval(verificarEExecutarAgendamentos,60000)}
+    function sincronizarEIniciarScheduler(){if(schedulerInterval)clearInterval(schedulerInterval);if(syncTimeout)clearTimeout(syncTimeout);const sA=new Date().getSeconds();const dMs=(60-sA)*1000;syncTimeout=setTimeout(iniciarSchedulerSincronizado,dMs)}
+    
+    function toggleAgendamento(){
+        const b=document.getElementById('btn-toggle-agendamento'),p=document.getElementById('btn-pause-resume-agendamento');
+        if(isAgendamentoAtivo){
+            if(schedulerInterval)clearInterval(schedulerInterval);if(syncTimeout)clearTimeout(syncTimeout);
+            schedulerInterval=null;syncTimeout=null;isAgendamentoAtivo=!1;isAutomacaoPausada=!1;
+            if(b){b.textContent="Ligar Automação";b.style.background = 'linear-gradient(135deg, #23a745, #2dc24f)';}
+            if(p)p.style.display='none';
+        }else{
+            PAUSAS_AGENDADAS=carregarHorariosLocalStorage();
+            ultimoEventoProcessado=null;isAutomacaoPausada=!1;isAgendamentoAtivo=!0;
+            if(b){b.textContent="Desligar Automação";b.style.background = 'linear-gradient(135deg, #dc3545, #e84a5f)';}
+            if(p){
+                p.textContent="Pausar ⏸️";p.style.background = 'linear-gradient(135deg, #ffc107, #ffd25a)';p.style.color = '#000';p.style.display='inline-block';
+            }
+            sincronizarEIniciarScheduler();
+        }
+    }
+    function togglePausaAutomacao(){
+        if(!isAgendamentoAtivo)return;
+        isAutomacaoPausada=!isAutomacaoPausada;
+        const b=document.getElementById('btn-pause-resume-agendamento');
+        if(isAutomacaoPausada){
+            if(b){b.textContent="Retomar ▶️";b.style.background = 'linear-gradient(135deg, #007FFF, #009cff)';b.style.color = '#fff';}
+        }else{
+            if(b){b.textContent="Pausar ⏸️";b.style.background = 'linear-gradient(135deg, #ffc107, #ffd25a)';b.style.color = '#000';}
+            verificarEExecutarAgendamentos();
+        }
+    }
+
+    // --- Edição ---
+    function adicionarNovoHorario(){const iH=document.getElementById('novo-horario-hora'),iS=document.getElementById('novo-horario-status');if(!iH||!iS)return;const h=iH.value,s=iS.value.trim();if(!h||!s)return;if(PAUSAS_AGENDADAS.some(p=>p.hora===h)){if(!confirm(`Já existe ${h}. Substituir?`))return;PAUSAS_AGENDADAS=PAUSAS_AGENDADAS.filter(p=>p.hora!==h)}PAUSAS_AGENDADAS.push({hora:h,status:s});PAUSAS_AGENDADAS.sort((a,b)=>a.hora.localeCompare(b.hora));salvarHorariosLocalStorage(PAUSAS_AGENDADAS);iH.value='';iS.value='';renderizarAgendamentos();alert("Horário salvo! Reinicie a automação.")}
+    function removerHorario(idx){if(idx<0||idx>=PAUSAS_AGENDADAS.length)return;if(confirm("Remover?")){PAUSAS_AGENDADAS.splice(idx,1);salvarHorariosLocalStorage(PAUSAS_AGENDADAS);renderizarAgendamentos();alert("Removido! Reinicie a automação.")}}
+    function carregarHorarioParaEdicao(idx){if(idx<0||idx>=PAUSAS_AGENDADAS.length)return;const item=PAUSAS_AGENDADAS[idx];const iH=document.getElementById('novo-horario-hora'),iS=document.getElementById('novo-horario-status');if(!iH||!iS)return;iH.value=item.hora;iS.value=item.status;iS.focus();iS.select()}
+
+    // --- Export/Import ---
+    function exportarConfiguracoes(){try{const c={pausas:carregarHorariosLocalStorage(),notificacoes:carregarConfiguracoesNotificacaoLocalStorage(),posicoes:{main:carregarPosicaoPainelLocalStorage(STORAGE_KEY_POS_MAIN),config:carregarPosicaoPainelLocalStorage(STORAGE_KEY_POS_CONFIG)}};const d="data:text/json;charset=utf-8,"+encodeURIComponent(JSON.stringify(c,null,2));const l=document.createElement('a');l.setAttribute('href',d);l.setAttribute('download','config_gerenciador_pausas.json');document.body.appendChild(l);l.click();l.remove();}catch(e){alert("Erro ao exportar.")}}
+    function importarConfiguracoes(){const i=document.getElementById('import-file-input');if(i)i.click()}
+    function handleArquivoImportado(event){const a=event.target.files[0];if(!a)return;const r=new FileReader();r.onload=function(e){try{const c=JSON.parse(e.target.result);if(c&&c.pausas){salvarHorariosLocalStorage(c.pausas);salvarConfiguracoesNotificacaoLocalStorage(c.notificacoes||NOTIF_CONFIG_DEFAULT);salvarPosicaoPainelLocalStorage(STORAGE_KEY_POS_MAIN,c.posicoes?.main);salvarPosicaoPainelLocalStorage(STORAGE_KEY_POS_CONFIG,c.posicoes?.config);alert("Importado com sucesso! Recarregue a página.");}}catch(err){alert("Arquivo inválido.")}};r.readAsText(a)}
+
+    // ----------------------------------------------------
+    // LÓGICA DE AÇÃO
+    // ----------------------------------------------------
+    const DELAY_ABRIR_MENU = 700; const DELAY_ABRIR_SUBMENU = 500; const DELAY_FECHAR_MENU = 200;
+    
+    function executarLogicaMenuSimples(seletorBotao, nomePausa, isAutomatico = false) {
+        if (clicarElemento(SELECTORES.MENU_STATUS_TOGGLE)) {
+            setTimeout(() => {
+                if (!clicarElemento(seletorBotao)) {
+                    console.warn(`[AÇÃO] Falha ao clicar ${nomePausa}.`);
+                    clicarElemento(SELECTORES.MENU_STATUS_TOGGLE);
+                }
+            }, DELAY_ABRIR_MENU);
+        }
+    }
+    
+    function executarLogicaSubMenu(seletorMenuTexto, seletorItemTexto, nomePausa, isAutomatico = false) {
+         if (clicarElemento(SELECTORES.MENU_STATUS_TOGGLE)) {
+            setTimeout(() => {
+                const seletorMenuBotao = SELECTORES.STATUS_LABEL_TEXT; 
+                if (clicarElemento(seletorMenuBotao, seletorMenuTexto)) { 
+                    setTimeout(() => {
+                        if (clicarElemento(SELECTORES.STATUS_LABEL_TEXT, seletorItemTexto)) {
+                             setTimeout(clicarVoltarSubmenu, DELAY_FECHAR_MENU);
+                        } else {
+                             clicarElemento(SELECTORES.VOLTAR_SUBMENU); 
+                             setTimeout(clicarElemento, DELAY_FECHAR_MENU, SELECTORES.MENU_STATUS_TOGGLE);
+                        }
+                    }, DELAY_ABRIR_SUBMENU);
+                } else {
+                     clicarElemento(SELECTORES.MENU_STATUS_TOGGLE);
+                }
+            }, DELAY_ABRIR_MENU);
+        }
+    }
+
+    function executarLogicaNaFila(isAutomatico = false) {
+        let clicado = false; 
+        let elDireto = document.querySelector(SELECTORES.NA_FILA_DIRETO);
+        if (elDireto && elDireto.offsetHeight !== 0) {
+            try{ elDireto.click(); clicado = true; } catch(e){ clicado = clicarElemento(SELECTORES.NA_FILA_DIRETO); }
+        } else {
+            try {
+                const guxToggle = document.querySelector(SELECTORES.NA_FILA_TOGGLE_HOST);
+                if (guxToggle && guxToggle.shadowRoot) {
+                    const slider = guxToggle.shadowRoot.querySelector('div[role="checkbox"]'); 
+                    if (slider) { slider.click(); clicado = true; } 
+                }
+            } catch (e) {}
+        }
+        if(!clicado) console.warn("Ação 'Na Fila' falhou.");
+    }
+    
+    function executarLogicaRefeicao(isAutomatico = false){ executarLogicaMenuSimples(SELECTORES.REFEICAO, 'Refeição', isAutomatico); }
+    function executarLogicaDisponivel(isAutomatico = false){ executarLogicaMenuSimples(SELECTORES.DISPONIVEL, 'Disponível', isAutomatico); }
+    function executarLogicaTreinamento(isAutomatico = false){ executarLogicaMenuSimples(SELECTORES.TREINAMENTO, 'Treinamento', isAutomatico); }
+    function executarLogicaReuniao(isAutomatico = false){ executarLogicaMenuSimples(SELECTORES.REUNIAO, 'Reunião', isAutomatico); }
+    function executarLogicaDescanso(isAutomatico = false){ executarLogicaSubMenu("Intervalo", "Pausa auricular", "Pausa auricular", isAutomatico); }
+    function executarLogicaPausaOut(isAutomatico = false){ executarLogicaSubMenu("Ocupado", "Pausa out", "Pausa out", isAutomatico); }
+    function executarLogicaBackoffice(isAutomatico = false){ executarLogicaSubMenu("Ocupado", "Atividade backoffice", "Backoffice", isAutomatico); }
+    function executarLogicaFeedback(isAutomatico = false){ executarLogicaSubMenu("Ocupado", "Feedback", "Feedback", isAutomatico); }
+    function executarLogicaParticular(isAutomatico = false){ executarLogicaSubMenu("Ausente", "Particular", "Particular", isAutomatico); }
+    function executarLogicaQuestoesSaude(isAutomatico = false){ executarLogicaSubMenu("Ausente", "Questões de saúde", "Saúde", isAutomatico); }
+
+    function executarLogicaLogoff(isAutomatico = false) {
+        if (!isAutomatico && !confirm("Fazer logoff? Histórico será zerado.")) return;
+        if (clicarElemento(SELECTORES.MENU_STATUS_TOGGLE)) {
+            setTimeout(() => {
+                if (clicarElemento(SELECTORES.LOGOFF, "Fazer logoff")) {
+                    historicoPausas=[];
+                    estadoAtual={tipo:'Logoff',inicio:new Date,ativa:!1};
+                    atualizarUI();renderizarHistoricoLog();renderizarEstatisticas();
+                    if(isAgendamentoAtivo) toggleAgendamento();
+                } else {
+                    clicarElemento(SELECTORES.MENU_STATUS_TOGGLE);
+                }
+            }, DELAY_ABRIR_MENU);
+        }
+    }
+
+    // ======================================================
+    // ORQUESTRADORES
+    // ======================================================
+
+    function iniciarNaFila(isAutomatico = false){ registrarPausa("Na fila"); executarLogicaNaFila(isAutomatico); }
+    function iniciarRefeicao(isAutomatico = false){ registrarPausa("Refeição"); executarLogicaRefeicao(isAutomatico); }
+    function voltarDisponivel(isAutomatico = false){ registrarPausa("Disponível"); executarLogicaDisponivel(isAutomatico); }
+    function iniciarTreinamento(isAutomatico = false){ registrarPausa("Treinamento"); executarLogicaTreinamento(isAutomatico); }
+    function iniciarReuniao(isAutomatico = false){ registrarPausa("Reunião"); executarLogicaReuniao(isAutomatico); }
+    function iniciarDescanso(isAutomatico = false){ registrarPausa("Pausa auricular"); executarLogicaDescanso(isAutomatico); }
+    function iniciarPausaOut(isAutomatico = false){ registrarPausa("Pausa out"); executarLogicaPausaOut(isAutomatico); }
+    function iniciarBackoffice(isAutomatico = false){ registrarPausa("Backoffice"); executarLogicaBackoffice(isAutomatico); }
+    function iniciarFeedback(isAutomatico = false){ registrarPausa("Feedback"); executarLogicaFeedback(isAutomatico); }
+    function iniciarParticular(isAutomatico = false){ registrarPausa("Particular"); executarLogicaParticular(isAutomatico); }
+    function iniciarQuestoesSaude(isAutomatico = false){ registrarPausa("Saúde"); executarLogicaQuestoesSaude(isAutomatico); }
+    function realizarLogoff(isAutomatico = false){ executarLogicaLogoff(isAutomatico); }
+
+    // ----------------------------------------------------
+    // UI, ARRASTE GPU + IFRAME FIX (V51.1)
+    // ----------------------------------------------------
+    
+    // Função utilitária para criar o Overlay de proteção contra Iframes
+    function criarDragOverlay() {
+        if(document.getElementById('pausa-script-drag-overlay')) return;
+        const o = document.createElement('div');
+        o.id = 'pausa-script-drag-overlay';
+        o.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;z-index:999999;display:none;cursor:grabbing;';
+        document.body.appendChild(o);
+        return o;
+    }
+// =======================================================
+    // NOVO SISTEMA DE ARRASTE — V51.1 (FLUIDO + INÉRCIA)
+    // =======================================================
+    function setupGPUDrag(elementId, headerId, storageKey) {
+        const element = document.getElementById(elementId);
+        const header = document.getElementById(headerId);
+        const icone = document.getElementById('pausa-script-icone');
+        const overlay = document.getElementById('pausa-script-drag-overlay');
+
+        if (!element || !header || !overlay) return;
+
+        let dragging = false;
+        let startX = 0, startY = 0;
+        let initialLeft = 0, initialTop = 0;
+        let lastClientX = 0, lastClientY = 0;
+        let lastTime = 0;
+        let velX = 0, velY = 0;
+        let transX = 0, transY = 0;
+        let moved = false;
+
+        const MOVE_THRESHOLD = 6;
+        const FRICTION = 0.90;
+        const MIN_SPEED = 0.25;
+
+        function disableSelection(flag) {
+            document.body.style.userSelect = flag ? "none" : "";
+            document.body.style.touchAction = flag ? "none" : "";
+        }
+
+        function applyTransform() {
+            element.style.transform = `translate(${transX}px, ${transY}px)`;
+        }
+
+        function getBoundedPosition(x, y) {
+            const maxX = window.innerWidth - element.offsetWidth;
+            const maxY = window.innerHeight - element.offsetHeight;
+
+            return {
+                x: Math.max(0, Math.min(x, maxX)),
+                y: Math.max(0, Math.min(y, maxY))
+            };
+        }
+
+        function onPointerDown(e) {
+            const isHeader = header.contains(e.target);
+            const isIcon = (icone && icone.contains(e.target));
+
+            if (!isHeader && !isIcon) return;
+
+            dragging = true;
+            moved = false;
+
+            startX = e.clientX;
+            startY = e.clientY;
+
+            lastClientX = e.clientX;
+            lastClientY = e.clientY;
+            lastTime = performance.now();
+
+            const rect = element.getBoundingClientRect();
+            initialLeft = rect.left;
+            initialTop = rect.top;
+
+            element.style.transition = "none";
+            element.style.left = initialLeft + "px";
+            element.style.top = initialTop + "px";
+            element.style.transform = "none";
+
+            overlay.style.display = "block";
+            disableSelection(true);
+
+            document.addEventListener("pointermove", onPointerMove, { passive: false });
+            document.addEventListener("pointerup", onPointerUp, { passive: false });
+            document.addEventListener("pointercancel", onPointerUp, { passive: false });
+        }
+
+        function onPointerMove(e) {
+            if (!dragging) return;
+            e.preventDefault();
+
+            const now = performance.now();
+            const dt = now - lastTime;
+
+            const dx = e.clientX - lastClientX;
+            const dy = e.clientY - lastClientY;
+
+            velX = dx / dt * 16.6;
+            velY = dy / dt * 16.6;
+
+            lastClientX = e.clientX;
+            lastClientY = e.clientY;
+            lastTime = now;
+
+            const totalDX = e.clientX - startX;
+            const totalDY = e.clientY - startY;
+
+            if (!moved && (Math.abs(totalDX) > MOVE_THRESHOLD || Math.abs(totalDY) > MOVE_THRESHOLD)) {
+                moved = true;
+            }
+
+            transX = totalDX;
+            transY = totalDY;
+
+            applyTransform();
+        }
+
+        function animateInertia() {
+            velX *= FRICTION;
+            velY *= FRICTION;
+
+            transX += velX;
+            transY += velY;
+
+            const newLeft = initialLeft + transX;
+            const newTop = initialTop + transY;
+
+            const bounded = getBoundedPosition(newLeft, newTop);
+
+            element.style.left = bounded.x + "px";
+            element.style.top = bounded.y + "px";
+
+            element.style.transform = "none";
+
+            if (Math.abs(velX) > MIN_SPEED || Math.abs(velY) > MIN_SPEED) {
+                requestAnimationFrame(animateInertia);
+            } else {
+                salvarPosicaoPainelLocalStorage(storageKey, element);
+                overlay.style.display = "none";
+                disableSelection(false);
+
+                globalWasDragging = moved;
+                setTimeout(() => globalWasDragging = false, 150);
+            }
+        }
+
+        function onPointerUp() {
+            if (!dragging) return;
+            dragging = false;
+
+            document.removeEventListener("pointermove", onPointerMove);
+            document.removeEventListener("pointerup", onPointerUp);
+            document.removeEventListener("pointercancel", onPointerUp);
+
+            if (!moved) {
+                overlay.style.display = "none";
+                disableSelection(false);
+                globalWasDragging = false;
+                return;
+            }
+
+            animateInertia();
+        }
+
+        header.addEventListener("pointerdown", onPointerDown);
+        if (icone) icone.addEventListener("pointerdown", onPointerDown);
+    }
+
+    function toggleVisibilidade() {
+        const c=document.getElementById('pausa-script-container'),o=document.getElementById('pausa-script-conteudo'),i=document.getElementById('pausa-script-icone');
+        if(!c||!o||!i)return;
+        const m=15;
+        if (o.style.display !== 'none') {
+            o.style.display = 'none'; i.style.display = 'flex';
+            c.style.width = 'auto'; c.style.padding = '5px 12px'; c.style.cursor = 'grab'; c.style.fontFamily = "'Courier New', Courier, monospace"; 
+            c.style.background='linear-gradient(145deg, rgba(20,25,35,0.9), rgba(30,35,50,0.95))'; 
+        } else {
+            o.style.display = 'block'; i.style.display = 'none';
+            const lE = 300; c.style.width = lE + 'px'; c.style.padding = '15px'; c.style.cursor = 'default'; c.style.fontFamily = "'Segoe UI',Tahoma,Geneva,Verdana,sans-serif"; 
+            c.style.background='linear-gradient(145deg, rgba(25,30,40,0.9), rgba(35,40,55,0.95))'; 
+            const h = c.querySelector('#pausa-script-header'); if (h) h.style.cursor = 'move';
+            if(c.style.top&&c.style.left){let cT=parseInt(c.style.top,10),cL=parseInt(c.style.left,10);setTimeout(()=>{const hE=c.offsetHeight;const mL=window.innerWidth-lE-m;if(cL>mL){c.style.left=mL+'px'}if(cL<m){c.style.left=m+'px'}const mT=window.innerHeight-hE-m;if(cT>mT){c.style.top=mT+'px'}if(cT<m){c.style.top=m+'px'}},10)}
+            else { const r=c.getBoundingClientRect();c.style.left=r.left+'px';c.style.top=r.top+'px';c.style.bottom = ''; c.style.right = ''; }
+        }
+    }
+    
+    function toggleVisibilidadeConfig(){const c=document.getElementById('pausa-script-config-container');if(!c)return;isConfigPainelAberto=!isConfigPainelAberto;c.style.display=isConfigPainelAberto?'block':'none';if(isConfigPainelAberto){renderizarAgendamentos();renderizarHistoricoLog();renderizarEstatisticas()}}
+    function renderizarAgendamentos(){const l=document.getElementById('agendamento-lista');if(!l)return; l.innerHTML='';if(PAUSAS_AGENDADAS.length===0){l.innerHTML='<p style="color:#999;margin:5px 0;font-size:11px;text-align:center;">Nenhum horário agendado.</p>'}else{const r=document.createDocumentFragment();PAUSAS_AGENDADAS.forEach((p,idx)=>{const i=document.createElement('div');i.style.cssText=`display:flex;justify-content:space-between;align-items:center;border-bottom:1px dashed #ffffff15;padding:4px 2px;font-size:11px;`;const tD=document.createElement('div');tD.style.flexGrow='1';tD.innerHTML=`<strong>${p.hora}</strong>: ${p.status}`;const bD=document.createElement('div');bD.style.flexShrink='0';bD.style.marginLeft='10px'; const bE=document.createElement('button');bE.innerHTML='✏️';bE.title=`Editar ${p.hora}`;bE.style.cssText=`background:0 0;border:none;color:#ffc107;cursor:pointer;font-size:14px;padding:0 4px;opacity:.7;transition:opacity .2s;`;bE.onmouseover=function(){this.style.opacity='1'};bE.onmouseout=function(){this.style.opacity='.7'};bE.onclick=()=>carregarHorarioParaEdicao(idx); const bR=document.createElement('button');bR.innerHTML='❌';bR.title=`Remover ${p.hora}`;bR.style.cssText=`background:0 0;border:none;color:#ff6b6b;cursor:pointer;font-size:14px;padding:0 4px;margin-left:5px;opacity:.7;transition:opacity .2s`;bR.onmouseover=function(){this.style.opacity='1'};bR.onmouseout=function(){this.style.opacity='.7'};bR.onclick=()=>removerHorario(idx); bD.appendChild(bE);bD.appendChild(bR);i.appendChild(tD);i.appendChild(bD);r.appendChild(i)});l.appendChild(r)}}
+function renderizarHistoricoLog(){const l=document.getElementById('historico-log');if(!l)return; l.innerHTML='';if(historicoPausas.length===0){l.innerHTML='<p style="color:#999;margin:5px 0;font-size:11px;">Nenhum registro.</p>';return} const f=document.createDocumentFragment();historicoPausas.slice().reverse().forEach(p=>{const i=document.createElement('div');i.style.cssText=`border-bottom:1px dashed #ffffff15;padding:4px 0;font-size:11px;line-height:1.4;`;i.innerHTML=`<strong>${p.tipo}</strong>: ${p.inicio} às ${p.fim} <span style="color:#00b0ff;">(Dur: ${p.duracao})</span>`;f.appendChild(i)});l.appendChild(f);}
+    function renderizarEstatisticas(){const s=document.getElementById('estatisticas-pausas');if(!s)return; s.innerHTML='';if(historicoPausas.length===0){s.innerHTML='<p style="color:#999;font-style:italic;margin:5px 0;font-size:11px;">Sem estatísticas.</p>';return} const r={};historicoPausas.forEach(p=>{const t=p.tipo;if(!r[t])r[t]={c:0,s:0};r[t].c++;r[t].s+=converterDuracaoParaSegundos(p.duracao)}); const d=document.createElement('details');d.style.marginTop='10px';d.open=!0; const m=document.createElement('summary');m.style.cssText='cursor:pointer;color:#00b0ff;font-weight:700;margin-bottom:5px;';m.textContent='Estatísticas';d.appendChild(m); const c=document.createElement('div');c.style.cssText=`background-color:#00000040;padding:8px;border-radius:8px;font-size:11px;`; const f=document.createDocumentFragment();const k=Object.keys(r).sort();k.forEach((t,x)=>{const o=r[t];const u=formatarDuracao(o.s);const i=document.createElement('div');i.style.cssText=`display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px dashed #ffffff15;line-height:1.4;`;if(x===k.length-1)i.style.borderBottom='none';i.innerHTML=`<strong>${t} (x${o.c})</strong> <span style="color:#00b0ff;">${u}</span>`;f.appendChild(i)}); c.appendChild(f);d.appendChild(c);s.appendChild(d);}
+    function verificarSeletoresEAtualizarUI(){const rD=document.getElementById('seletores-resultados'); if(!rD)return; rD.innerHTML='<p style="font-style:italic;color:#bbb;">Verificando...</p>'; let hR='<ul style="list-style:none;padding:0;margin:5px 0 0 0;font-size:11px;">';setTimeout(()=>{Object.keys(SELECTORES).forEach(k=>{const s=SELECTORES[k]; const e=document.querySelector(s);const f=e!==null&&(e.offsetParent!==null||e.tagName==='DIV'||e.tagName==='SPAN'); hR+=`<li style="padding:3px 0;border-bottom:1px dashed #ffffff15;display:flex;justify-content:space-between;align-items:center;"><span style="color:#ccc; max-width: 80px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${k}:</span><span><code style="font-size:10px;background-color:rgba(0,255,255,.1);border:1px solid rgba(0,255,255,.2);color:#9fefef;padding:1px 3px;border-radius:3px; max-width: 120px; display: inline-block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${s}</code><span style="margin-left:8px;font-weight:700;color:${f?'#50fa7b':'#ff5555'};">${f?'Ok':'Fail'}</span></span></li>`;});hR+='</ul>';rD.innerHTML=hR},50)}
+
+    // --- CRIAR UI PRINCIPAL ---
+    function criarUI() {
+        const cId='pausa-script-container';let cA=document.getElementById(cId);if(cA)cA.remove(); 
+        const c=document.createElement('div');c.id=cId;document.body.appendChild(c);
+
+        const pS=carregarPosicaoPainelLocalStorage(STORAGE_KEY_POS_MAIN);
+        let cssPos = `position:fixed; ${pS ? (pS.top ? `top:${pS.top};left:${pS.left};` : `bottom:${pS.bottom};right:${pS.right};`) : 'bottom:30px;right:30px;'}`;
+
+        c.style.cssText = `${cssPos} width:auto;height:auto;color:#E0E0E0;font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;padding:5px 12px;border-radius:10px;border:1px solid rgba(0,255,255,0.3);background:linear-gradient(145deg,rgba(20,25,35,0.9),rgba(30,35,50,0.95));box-shadow:0 8px 20px rgba(0,0,0,0.5),0 0 10px rgba(0,255,255,0.1);backdrop-filter:blur(10px);z-index:2147483647;cursor:grab;user-select:none;transition:box-shadow .2s;box-sizing:border-box;will-change:transform;`;
+
+        c.innerHTML=`
+            <div id="pausa-script-icone" style="display:flex;">
+                <span id="pausa-script-clock-dot" style="display:none;"></span>
+                <span id="top-bar-time">--:--:--</span>
+            </div>
+            <div id="pausa-script-conteudo" style="display:none;padding:0;">
+                <div id="pausa-script-header" style="display:flex;justify-content:space-between;align-items:center;">
+                    <h3 style="margin:0;color:#0FF;font-size:16px;">Gerenciador</h3>
+                    <div style="display:flex;gap:10px;">
+                        <span id="pausa-script-header-clock" style="font-size:15px;color:#f1fa8c;">--:--:--</span>
+                        <span id="btn-abrir-config" style="cursor:pointer;">⚙️</span>
+                        <span id="btn-minimizar" style="cursor:pointer;color:#ff5555">[X]</span>
+                    </div>
+                </div>
+
+                <div id="status-display">Status: <strong id="current-status" style="color:#50fa7b;">Disponível</strong></div>
+
+                <button id="btn-toggle-agendamento" class="script-btn">Ligar Automação</button>
+                <button id="btn-pause-resume-agendamento" class="script-btn" style="display:none;">Pausar ⏸️</button>
+
+                <div id="buttons-container">
+                    <button id="btn-disponivel" class="script-btn">🟢 Disponível</button>
+                    <button id="btn-na-fila" class="script-btn">🎧 Na Fila</button>
+                    <button id="btn-refeicao" class="script-btn">🍔 Refeição</button>
+                    <button id="btn-descanso" class="script-btn">☕ Pausa auricular</button>
+                    <button id="btn-pausa-out" class="script-btn">⛔ Pausa Out</button>
+                    <button id="btn-treinamento" class="script-btn">📚 Treinamento</button>
+                    <button id="btn-backoffice" class="script-btn">📁 Backoffice</button>
+                    <button id="btn-feedback" class="script-btn">📝 Feedback</button>
+                    <button id="btn-particular" class="script-btn">🔒 Particular</button>
+                    <button id="btn-saude" class="script-btn">🩺 Saúde</button>
+                </div>
+
+                <div id="buttons-extra">
+                    <button id="btn-reuniao" class="script-btn">🧑‍🤝‍🧑 Reunião</button>
+                    <button id="btn-logoff" class="script-btn">🚪 Fazer Logoff</button>
+                </div>
+            </div>
+        `;
+
+        criarDragOverlay();
+        setupGPUDrag('pausa-script-container', 'pausa-script-header', STORAGE_KEY_POS_MAIN);
+
+        c.addEventListener('click',function(e){
+            if (globalWasDragging) return;
+            const t=e.target.closest('button'),n=e.target.closest('span#btn-minimizar, span#btn-abrir-config'),o=e.target.closest('div#pausa-script-icone');
+            if(!t&&!n&&!o)return;
+
+            const d=document.getElementById('pausa-script-conteudo');
+            if(o && d && d.style.display==='none'){ toggleVisibilidade(); return; }
+
+            let id = (t||n||o).id;
+            switch(id){
+                case'btn-na-fila':iniciarNaFila(false);break; 
+                case'btn-refeicao':iniciarRefeicao(false);break;
+                case'btn-descanso':iniciarDescanso(false);break; 
+                case'btn-pausa-out':iniciarPausaOut(false);break;
+                case'btn-disponivel':voltarDisponivel(false);break; 
+                case'btn-logoff':realizarLogoff(false);break;
+                case'btn-treinamento':iniciarTreinamento(false);break; 
+                case'btn-reuniao':iniciarReuniao(false);break;
+                case'btn-backoffice':iniciarBackoffice(false);break;
+                case'btn-feedback':iniciarFeedback(false);break;
+                case'btn-particular':iniciarParticular(false);break;
+                case'btn-saude':iniciarQuestoesSaude(false);break;
+                case'btn-toggle-agendamento':toggleAgendamento();break; 
+                case'btn-pause-resume-agendamento':togglePausaAutomacao();break;
+                case'btn-minimizar':toggleVisibilidade();break; 
+                case'btn-abrir-config':toggleVisibilidadeConfig();break;
+            }
+        });
+
+        registrarPausa(estadoAtual.tipo); 
+        adicionarAtalho(); 
+        setInterval(atualizarUI,1000);
+    }
+
+    // --- UI CONFIGURAÇÕES ---
+    function criarUIConfiguracoes() {
+        const cId='pausa-script-config-container';
+        let old=document.getElementById(cId);
+        if(old) old.remove();
+
+        const cC=document.createElement('div');
+        cC.id=cId;
+        document.body.appendChild(cC);
+
+        cC.style.cssText="position:fixed;bottom:30px;right:340px;width:340px;background:#1b1f29;color:#fff;padding:15px;border-radius:10px;z-index:2147483646;display:none;max-height:80vh;overflow-y:auto";
+
+        cC.innerHTML=`
+            <div style="display:flex;justify-content:space-between;">
+                <h3>Configurações</h3>
+                <span id="btn-fechar-config" style="cursor:pointer;color:#ff5555">[X]</span>
+            </div>
+
+            <details open>
+                <summary>Estatísticas</summary>
+                <div id="estatisticas-pausas"></div>
+            </details>
+
+            <details open>
+                <summary>Horários</summary>
+                <div id="agendamento-lista"></div>
+                <input type="time" id="novo-horario-hora">
+                <input type="text" id="novo-horario-status">
+                <button id="btn-adicionar-horario">Adicionar</button>
+            </details>
+
+            <details>
+                <summary>Histórico</summary>
+                <div id="historico-log"></div>
+            </details>
+
+            <details>
+                <summary>Diagnóstico</summary>
+                <button id="btn-verificar-seletores">Verificar</button>
+                <div id="seletores-resultados"></div>
+            </details>
+        `;
+
+        setupGPUDrag('pausa-script-config-container', cC, STORAGE_KEY_POS_CONFIG);
+
+        cC.querySelector('#btn-fechar-config').onclick = toggleVisibilidadeConfig;
+        cC.querySelector('#btn-adicionar-horario').onclick = adicionarNovoHorario;
+        cC.querySelector('#btn-verificar-seletores').onclick = verificarSeletoresEAtualizarUI;
+
+        renderizarAgendamentos();
+        renderizarHistoricoLog();
+        renderizarEstatisticas();
+    }
+
+    // --- ATUALIZAÇÃO DE UI ---
+    function atualizarUI() {
+        const now=new Date();
+        const h=now.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+
+        const tFlutuante=document.getElementById('top-bar-time');
+        const tHeader=document.getElementById('pausa-script-header-clock');
+
+        if(tFlutuante) tFlutuante.textContent=h;
+        if(tHeader) tHeader.textContent=h;
+
+        const s=document.getElementById('current-status');
+        if(s){
+            let extra="";
+            if(estadoAtual.ativa){
+                const d=Math.floor((now-estadoAtual.inicio)/1000);
+                extra=` (${formatarDuracao(d)})`;
+            }
+            s.textContent = estadoAtual.tipo + extra;
+        }
+    }
+
+    // --- START ---
+    console.log("[GERENCIADOR V51.1] Iniciando...");
+    setTimeout(() => {
+        try {
+            configNotificacao = carregarConfiguracoesNotificacaoLocalStorage();
+            PAUSAS_AGENDADAS = carregarHorariosLocalStorage();
+
+            criarUI();
+            criarUIConfiguracoes();
+            renderizarAgendamentos();
+
+            document.addEventListener('click', desbloquearAudio, { once:true });
+
+        } catch (e) { console.error("[GERENCIADOR] Erro:", e); }
+    }, 1200);
+
+})();
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 // =======================
 // V51.1 - DRAG MELHORADO
 // Suporte pointer events, rAF, inércia, snap, touch-friendly

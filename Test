@@ -717,136 +717,7 @@ function renderizarHistoricoLog(){const l=document.getElementById('historico-log
 
 
 
-// =======================
-// V51.1 - DRAG MELHORADO
-// Suporte pointer events, rAF, inércia, snap, touch-friendly
-// =======================
-function setupGPUDrag(elementId, headerId, storageKey) {
-    const element = document.getElementById(elementId);
-    const header = document.getElementById(headerId);
-    const icone = document.getElementById('pausa-script-icone');
-    const overlay = document.getElementById('pausa-script-drag-overlay');
-
-    if (!element || !header || !overlay) return;
-
-    let dragging = false;
-    let startX = 0, startY = 0;
-    let initialLeft = 0, initialTop = 0;
-    let currentTranslateX = 0, currentTranslateY = 0;
-    let rafId = null;
-    let lastMoveTime = 0;
-    let lastClientX = 0, lastClientY = 0;
-    let velocityX = 0, velocityY = 0;
-    let hasMovedSignificantly = false;
-    const MOVE_THRESHOLD = 6; // px to consider as drag (slightly increased)
-    const FRICTION = 0.92; // 0..1, lower -> quicker stop
-    const MIN_VELOCITY = 0.2; // px/frame below which we stop inertia
-
-    // Disable text selection while dragging
-    function setUserSelectNone(flag) {
-        document.documentElement.style.userSelect = flag ? 'none' : '';
-        document.documentElement.style.touchAction = flag ? 'none' : '';
-    }
-
-    function getBoundedPosition(left, top) {
-        const maxLeft = Math.max(0, window.innerWidth - element.offsetWidth);
-        const maxTop = Math.max(0, window.innerHeight - element.offsetHeight);
-        const boundedLeft = Math.max(0, Math.min(left, maxLeft));
-        const boundedTop = Math.max(0, Math.min(top, maxTop));
-        return { boundedLeft, boundedTop };
-    }
-
-    // Apply transform efficiently via rAF
-    function applyTransform() {
-        element.style.transform = `translate3d(${currentTranslateX}px, ${currentTranslateY}px, 0)`;
-        rafId = null;
-    }
-
-    function scheduleTransform() {
-        if (rafId) return;
-        rafId = requestAnimationFrame(applyTransform);
-    }
-
-    function onPointerDown(e) {
-        // Only start drag if header or icon was pressed (same as before)
-        const isHeader = header.contains(e.target);
-        const isIcon = (icone && icone.contains(e.target) && icone.style.display !== 'none');
-        if (!isHeader && !isIcon) return;
-
-        // Ensure pointer capture so we continue receiving events (for elements that support it)
-        if (e.pointerId && element.setPointerCapture) {
-            try { element.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
-        }
-
-        dragging = true;
-        hasMovedSignificantly = false;
-
-        startX = e.clientX;
-        startY = e.clientY;
-        lastClientX = e.clientX;
-        lastClientY = e.clientY;
-        lastMoveTime = performance.now();
-        velocityX = 0;
-        velocityY = 0;
-
-        // compute initial left/top from style or bounding rect
-        const rect = element.getBoundingClientRect();
-        initialLeft = rect.left;
-        initialTop = rect.top;
-
-        // Reset transforms and set left/top so we move using translate
-        element.style.transition = 'none';
-        element.style.left = `${initialLeft}px`;
-        element.style.top = `${initialTop}px`;
-        element.style.bottom = 'auto';
-        element.style.right = 'auto';
-        currentTranslateX = 0;
-        currentTranslateY = 0;
-        element.style.transform = '';
-
-        // Visual affordances
-        element.style.cursor = 'grabbing';
-        if (header) header.style.cursor = 'grabbing';
-        if (icone) icone.style.cursor = 'grabbing';
-
-        // Show overlay to block iframes
-        overlay.style.display = 'block';
-        setUserSelectNone(true);
-
-        // Listen to pointermove/pointerup on document to be resilient
-        document.addEventListener('pointermove', onPointerMove, { passive: false });
-        document.addEventListener('pointerup', onPointerUp, { passive: false });
-        document.addEventListener('pointercancel', onPointerUp, { passive: false });
-    }
-
-    function onPointerMove(e) {
-        if (!dragging) return;
-        e.preventDefault();
-
-        const now = performance.now();
-        const dt = Math.max(1, now - lastMoveTime); // ms
-        const dx = e.clientX - lastClientX;
-        const dy = e.clientY - lastClientY;
-
-        // Instantaneous velocity (px per ms), convert to px/frame-like by multiplying dt
-        velocityX = dx / dt * 16.67; // approximate px per 16.67ms frame
-        velocityY = dy / dt * 16.67;
-
-        lastClientX = e.clientX;
-        lastClientY = e.clientY;
-        lastMoveTime = now;
-
-        const totalDX = e.clientX - startX;
-        const totalDY = e.clientY - startY;
-
-        if (!hasMovedSignificantly) {
-            if (Math.abs(totalDX) > MOVE_THRESHOLD || Math.abs(totalDY) > MOVE_THRESHOLD) {
-                hasMovedSignificantly = true;
-            }
-        }
-
-        currentTranslateX = totalDX;
-        currentTranslateY = totalDY;
+/        currentTranslateY = totalDY;
         scheduleTransform();
     }
 
@@ -995,3 +866,620 @@ function setupGPUDrag(elementId, headerId, storageKey) {
     // ensure element can receive focus for keyboard dragging
     element.setAttribute('tabindex', '0');
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// =================================================================
+// GERENCIADOR PAUSAS - V51.2 (OTIMIZADO PARA GENESYS - BRISANET)
+// Apenas arraste e mecanismo de clique/agendamento otimizados.
+// Cole as 3 partes em sequência no Tampermonkey.
+// =================================================================
+(function(){
+/* ---------- CONFIG / STATE ---------- */
+const SELECTORES = {
+  MENU_STATUS_TOGGLE: '#toggleUserDropdownTarget',
+  DISPONIVEL: 'button.presence-available',
+  REFEICAO: 'button.presence-meal',
+  INTERVALO_MENU: 'button.presence-break',
+  OCUPADO_MENU: 'button.presence-busy',
+  LOGOFF: 'span.menu-label',
+  NA_FILA_TOGGLE_HOST: 'gux-toggle#command-bar-queue-toggle',
+  NA_FILA_DIRETO: 'gux-button.onQueueButton',
+  VOLTAR_SUBMENU: 'button[title="Volte às presenças primárias"]',
+  STATUS_LABEL_TEXT: 'span.presence-label-text',
+  TREINAMENTO: 'button.presence-training',
+  REUNIAO: 'button.presence-meeting'
+};
+const PAUSAS_AGENDADAS_DEFAULT = [
+  {hora:"17:40",status:"Na fila"},{hora:"18:35",status:"Pausa out"},{hora:"18:40",status:"Pausa auricular"},
+  {hora:"18:50",status:"Na fila"},{hora:"19:45",status:"Pausa out"},{hora:"19:50",status:"Refeição"},
+  {hora:"20:10",status:"Na fila"},{hora:"22:25",status:"Pausa out"},{hora:"22:30",status:"Pausa auricular"},
+  {hora:"22:40",status:"Na fila"},{hora:"00:00",status:"Logoff"}
+];
+
+const STORAGE = {
+  PAUSAS: 'gerenciadorPausas_horarios',
+  POS_MAIN: 'gerenciadorPausas_posMain',
+  POS_CFG: 'gerenciadorPausas_posConfig',
+  NOTIF: 'gerenciadorPausas_notifConfig'
+};
+
+let estadoAtual = {tipo:'Disponível',inicio:new Date(),ativa:false};
+let historicoPausas = [];
+let PAUSAS_AGENDADAS = load(STORAGE.PAUSAS) || PAUSAS_AGENDADAS_DEFAULT.slice();
+let isAgendamentoAtivo=false, isAutomacaoPausada=false, schedulerInterval=null, syncTimeout=null, ultimoEventoProcessado=null;
+let globalWasDragging=false;
+let configNotificacao = load(STORAGE.NOTIF) || {ativadas:true,somAtivado:false,antecedenciaSegundos:15};
+let audioNotificacao = new Audio('https://www.soundjay.com/button/sounds/beep-07a.mp3');
+audioNotificacao.volume = 0.5;
+let audioDesbloqueado=false;
+
+/* ---------- UTIL ---------- */
+function save(k,v){ try{ localStorage.setItem(k, JSON.stringify(v)); }catch(e){} }
+function load(k){ try{ const v=localStorage.getItem(k); return v?JSON.parse(v):null }catch(e){return null} }
+function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
+function formatDur(s){ const h=Math.floor(s/3600), m=Math.floor((s%3600)/60), c=Math.max(0,s%60); const p=n=>String(n).padStart(2,'0'); return `${p(h)}:${p(m)}:${p(c)}` }
+function secFromHMS(d){ if(!d||typeof d!=='string') return 0; const p=d.split(':'); if(p.length!==3) return 0; return (parseInt(p[0],10)||0)*3600 + (parseInt(p[1],10)||0)*60 + (parseInt(p[2],10)||0); }
+
+/* ---------- NOTIFICAÇÃO E SOM ---------- */
+function desbloquearAudio(){ if(audioDesbloqueado) return; audioNotificacao.play().then(()=>{ audioNotificacao.pause(); audioNotificacao.currentTime=0; audioDesbloqueado=true; }).catch(()=>{}); document.removeEventListener('click',desbloquearAudio); }
+function tocarSom(){ if(!configNotificacao.somAtivado) return; if(!audioDesbloqueado){ document.addEventListener('click', desbloquearAudio, {once:true}); return; } audioNotificacao.currentTime=0; audioNotificacao.play().catch(()=>{}); }
+async function mostrarNotificacao(ev){ if(!configNotificacao.ativadas) return; if(!("Notification" in window)) return; if(Notification.permission==='granted'){ tocarSom(); new Notification("Gerenciador",{body:`${ev.status} às ${ev.hora}`}); } else if(Notification.permission==='default'){ try{ const p=await Notification.requestPermission(); if(p==='granted') mostrarNotificacao(ev); }catch(e){} } }
+
+/* ---------- ROBUST CLICK ENGINE (shadow DOM + retries) ---------- */
+/*
+ - clicarRobustoSync(selector, text) -> boolean
+ - tenta localizar em shadowRoots também
+ - faz até N tentativas com pequenos delays
+*/
+function queryAllDeep(selector){
+  // busca simples + shadow root crawl (profundidade limitada)
+  const results = Array.from(document.querySelectorAll(selector));
+  // crawl simples: procurar em shadow roots de elementos comuns (Hosts)
+  const hosts = Array.from(document.querySelectorAll('*')).filter(n=>n.shadowRoot);
+  for(const h of hosts){
+    try{
+      const inner = h.shadowRoot.querySelectorAll(selector);
+      if(inner && inner.length) results.push(...Array.from(inner));
+    }catch(e){}
+  }
+  return results;
+}
+function tryDispatchClick(el){
+  if(!el) return false;
+  try{ if(typeof el.click==='function'){ el.click(); return true; } }catch(e){}
+  try{
+    const d1=new MouseEvent('mousedown',{bubbles:true,cancelable:true,composed:true});
+    const d2=new MouseEvent('mouseup',{bubbles:true,cancelable:true,composed:true});
+    const d3=new MouseEvent('click',{bubbles:true,cancelable:true,composed:true});
+    el.dispatchEvent(d1); el.dispatchEvent(d2); el.dispatchEvent(d3);
+    return true;
+  }catch(e){}
+  try{
+    const p1=new PointerEvent('pointerdown',{bubbles:true,cancelable:true});
+    const p2=new PointerEvent('pointerup',{bubbles:true,cancelable:true});
+    const p3=new PointerEvent('click',{bubbles:true,cancelable:true});
+    el.dispatchEvent(p1); el.dispatchEvent(p2); el.dispatchEvent(p3);
+    return true;
+  }catch(e){}
+  return false;
+}
+function findByText(selector, text){
+  const nodes = queryAllDeep(selector);
+  text = (text||'').toString().trim().toLowerCase();
+  for(const n of nodes){
+    if((n.textContent||'').trim().toLowerCase()===text){
+      // preferir elemento botão pai
+      let el=n;
+      while(el && el.tagName !== 'BUTTON' && el.parentElement) el = el.parentElement;
+      return el || n;
+    }
+  }
+  return null;
+}
+function clicarRobustoSync(selector, text=null, attempts=5, delayMs=220){
+  // tentativas síncronas simples (não-blocking long) - retorna boolean
+  let ok=false;
+  for(let i=0;i<attempts;i++){
+    let el = text ? findByText(selector,text) : (document.querySelector(selector) || queryAllDeep(selector)[0]);
+    if(el){
+      ok = tryDispatchClick(el);
+      if(ok) return true;
+      // fallback: tentar clicar no parent button
+      let p = el;
+      while(p && p.tagName!=='BUTTON' && p.parentElement){ p = p.parentElement; }
+      if(p && p!==el){ ok = tryDispatchClick(p); if(ok) return true; }
+    }
+    // esperar de forma assíncrona (mas aqui loop síncrono com blocking curto não recomendado)
+    const start = Date.now();
+    while(Date.now()-start < delayMs){} // pequeno busy-wait compatível com userscripts
+  }
+  return false;
+}
+
+/* ---------- REGISTRO E HISTÓRICO ---------- */
+function registrarPausa(n){
+  const now=new Date();
+  if(estadoAtual.ativa){
+    const d = Math.round((now.getTime()-estadoAtual.inicio.getTime())/1000);
+    if(d>0){
+      historicoPausas.push({ tipo: estadoAtual.tipo, inicio: estadoAtual.inicio.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit',second:'2-digit'}), fim: now.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit',second:'2-digit'}), duracao: formatDur(d) });
+      renderizarHistoricoLog(); renderizarEstatisticas();
+    }
+  }
+  estadoAtual = { tipo:n, inicio: now, ativa: n!=='Logoff' };
+  atualizarUI();
+}
+/* ---------- AÇÕES (usa clicarRobustoSync) ---------- */
+const DELAY_ABRIR_MENU = 850, DELAY_ABRIR_SUBMENU = 520, DELAY_FECHAR_MENU = 200;
+
+function abrirMenu() {
+  return clicarRobustoSync(SELECTORES.MENU_STATUS_TOGGLE);
+}
+function clicarVoltarSubmenu(){ return clicarRobustoSync(SELECTORES.VOLTAR_SUBMENU); }
+
+/* ações diretas e em submenu (tenta ser resiliente) */
+function executarLogicaMenuSimples(seletor, nome){
+  if(!abrirMenu()) return false;
+  const ok = clicarRobustoSync(seletor);
+  if(!ok){ clicarRobustoSync(SELECTORES.MENU_STATUS_TOGGLE); }
+  return ok;
+}
+function executarLogicaSubMenu(menuTexto, itemTexto){
+  if(!abrirMenu()) return false;
+  // clicar no menu (p.ex. "Ocupado", "Intervalo")
+  const clicouMenu = clicarRobustoSync(SELECTORES.STATUS_LABEL_TEXT, menuTexto, 6, 220);
+  if(!clicouMenu){ clicarRobustoSync(SELECTORES.MENU_STATUS_TOGGLE); return false; }
+  // aguardar e tentar o item
+  const okItem = clicarRobustoSync(SELECTORES.STATUS_LABEL_TEXT, itemTexto, 6, 220);
+  // fechar submenu se abriu
+  setTimeout(()=> clicarVoltarSubmenu(), DELAY_FECHAR_MENU);
+  return okItem;
+}
+
+/* ações específicas */
+function executarLogicaNaFila(){ // tenta toggle direto ou fallback
+  let el=document.querySelector(SELECTORES.NA_FILA_DIRETO);
+  if(el && el.offsetHeight!==0){ return tryDispatchClick(el); }
+  // fallback para toggle host (shadow)
+  try{
+    const gux = document.querySelector(SELECTORES.NA_FILA_TOGGLE_HOST);
+    if(gux && gux.shadowRoot){
+      const slider = gux.shadowRoot.querySelector('div[role="checkbox"]');
+      if(slider) return tryDispatchClick(slider);
+    }
+  }catch(e){}
+  return false;
+}
+function executarLogicaRefeicao(){ return executarLogicaMenuSimples(SELECTORES.REFEICAO,'Refeição'); }
+function executarLogicaDisponivel(){ return executarLogicaMenuSimples(SELECTORES.DISPONIVEL,'Disponível'); }
+function executarLogicaTreinamento(){ return executarLogicaMenuSimples(SELECTORES.TREINAMENTO,'Treinamento'); }
+function executarLogicaReuniao(){ return executarLogicaMenuSimples(SELECTORES.REUNIAO,'Reunião'); }
+function executarLogicaDescanso(){ return executarLogicaSubMenu("Intervalo","Pausa auricular"); }
+function executarLogicaPausaOut(){ return executarLogicaSubMenu("Ocupado","Pausa out"); }
+function executarLogicaBackoffice(){ return executarLogicaSubMenu("Ocupado","Atividade backoffice"); }
+function executarLogicaFeedback(){ return executarLogicaSubMenu("Ocupado","Feedback"); }
+function executarLogicaParticular(){ return executarLogicaSubMenu("Ausente","Particular"); }
+function executarLogicaQuestoesSaude(){ return executarLogicaSubMenu("Ausente","Questões de saúde"); }
+function executarLogicaLogoff(){
+  if(!confirm("Fazer logoff? Histórico será zerado.")) return false;
+  if(!abrirMenu()) return false;
+  const ok = clicarRobustoSync(SELECTORES.LOGOFF,"Fazer logoff",6,240);
+  if(ok){ historicoPausas=[]; estadoAtual={tipo:'Logoff',inicio:new Date(),ativa:false}; atualizarUI(); renderizarHistoricoLog(); renderizarEstatisticas(); if(isAgendamentoAtivo) toggleAgendamento(); }
+  else clicarRobustoSync(SELECTORES.MENU_STATUS_TOGGLE);
+  return ok;
+}
+
+/* ---------- ORQUESTRADORES ---------- */
+function iniciarNaFila(auto=false){ registrarPausa("Na fila"); executarLogicaNaFila(); }
+function iniciarRefeicao(auto=false){ registrarPausa("Refeição"); executarLogicaRefeicao(); }
+function voltarDisponivel(auto=false){ registrarPausa("Disponível"); executarLogicaDisponivel(); }
+function iniciarTreinamento(auto=false){ registrarPausa("Treinamento"); executarLogicaTreinamento(); }
+function iniciarReuniao(auto=false){ registrarPausa("Reunião"); executarLogicaReuniao(); }
+function iniciarDescanso(auto=false){ registrarPausa("Pausa auricular"); executarLogicaDescanso(); }
+function iniciarPausaOut(auto=false){ registrarPausa("Pausa out"); executarLogicaPausaOut(); }
+function iniciarBackoffice(auto=false){ registrarPausa("Backoffice"); executarLogicaBackoffice(); }
+function iniciarFeedback(auto=false){ registrarPausa("Feedback"); executarLogicaFeedback(); }
+function iniciarParticular(auto=false){ registrarPausa("Particular"); executarLogicaParticular(); }
+function iniciarQuestoesSaude(auto=false){ registrarPausa("Saúde"); executarLogicaQuestoesSaude(); }
+function realizarLogoff(auto=false){ executarLogicaLogoff(); }
+
+/* ---------- SCHEDULER (sincronizado com início do minuto) ---------- */
+function verificarEExecutarAgendamentos(){
+  if(!isAgendamentoAtivo || isAutomacaoPausada) return;
+  const now=new Date();
+  const hh = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
+  const seg = now.getSeconds();
+  // limpar notificações expiradas
+  Object.keys(window).forEach(k=>{ if(k.startsWith('notif_')){ const p=k.split('_')[1]; if(p < hh){ clearTimeout(window[k]); delete window[k]; } } });
+
+  const ev = PAUSAS_AGENDADAS.find(p=>p.hora===hh);
+  if(ev && ultimoEventoProcessado !== hh){
+    console.log('[AGEND] executando',ev);
+    mapearEexecutarAcao(ev.status);
+    ultimoEventoProcessado = hh;
+    if(ev.status.toLowerCase()==='logoff'){ setTimeout(()=>{ if(isAgendamentoAtivo) toggleAgendamento(); },500); }
+    return;
+  }
+  if(!ev) ultimoEventoProcessado = null;
+
+  // notificações de antecedência
+  if(seg < 15){
+    const next = new Date(now.getTime()+60000);
+    const nextH = `${String(next.getHours()).padStart(2,'0')}:${String(next.getMinutes()).padStart(2,'0')}`;
+    const ev2 = PAUSAS_AGENDADAS.find(p=>p.hora===nextH);
+    if(ev2){
+      const antic = configNotificacao.antecedenciaSegundos || 15;
+      const sN = Math.max(0, (60-antic)-seg);
+      const id = `notif_${ev2.hora}_${ev2.status}`;
+      if(sN>0 && !window[id]){
+        window[id] = setTimeout(()=>{ mostrarNotificacao(ev2); delete window[id]; }, sN*1000);
+      }
+    }
+  }
+}
+function iniciarSchedulerSincronizado(){
+  if(!isAgendamentoAtivo) return;
+  if(schedulerInterval) clearInterval(schedulerInterval);
+  schedulerInterval = setInterval(verificarEExecutarAgendamentos, 1000*30); // checa a cada 30s para ser responsivo
+  verificarEExecutarAgendamentos();
+}
+function sincronizarEIniciarScheduler(){
+  if(schedulerInterval) clearInterval(schedulerInterval);
+  if(syncTimeout) clearTimeout(syncTimeout);
+  const s = new Date().getSeconds();
+  const delay = (60 - s) * 1000 + 50;
+  syncTimeout = setTimeout(iniciarSchedulerSincronizado, delay);
+}
+
+/* ---------- TOGGLE AGENDAMENTO ---------- */
+function toggleAgendamento(){
+  isAgendamentoAtivo = !isAgendamentoAtivo;
+  const btn = document.getElementById('btn-toggle-agendamento');
+  const btPause = document.getElementById('btn-pause-resume-agendamento');
+  if(isAgendamentoAtivo){
+    PAUSAS_AGENDADAS = load(STORAGE.PAUSAS) || PAUSAS_AGENDADAS;
+    ultimoEventoProcessado = null; isAutomacaoPausada = false;
+    if(btn) { btn.textContent = "Desligar Automação"; btn.style.background='linear-gradient(135deg,#dc3545,#e84a5f)'; }
+    if(btPause){ btPause.style.display='inline-block'; btPause.textContent='Pausar ⏸️'; btPause.style.background='linear-gradient(135deg,#ffc107,#ffd25a)'; btPause.style.color='#000'; }
+    sincronizarEIniciarScheduler();
+  } else {
+    if(schedulerInterval) clearInterval(schedulerInterval);
+    if(syncTimeout) clearTimeout(syncTimeout);
+    schedulerInterval = null; syncTimeout = null; isAutomacaoPausada=false;
+    if(btn){ btn.textContent = "Ligar Automação"; btn.style.background='linear-gradient(135deg,#23a745,#2dc24f)'; }
+    if(btPause) btPause.style.display='none';
+  }
+}
+function togglePausaAutomacao(){
+  if(!isAgendamentoAtivo) return;
+  isAutomacaoPausada = !isAutomacaoPausada;
+  const b = document.getElementById('btn-pause-resume-agendamento');
+  if(isAutomacaoPausada){ if(b){ b.textContent="Retomar ▶️"; b.style.background='linear-gradient(135deg,#007FFF,#009cff)'; b.style.color='#fff'; } }
+  else { if(b){ b.textContent="Pausar ⏸️"; b.style.background='linear-gradient(135deg,#ffc107,#ffd25a)'; b.style.color='#000'; } verificarEExecutarAgendamentos(); }
+}
+
+/* ---------- EDIT / IMPORT / EXPORT ---------- */
+function adicionarNovoHorario(){
+  const iH=document.getElementById('novo-horario-hora'), iS=document.getElementById('novo-horario-status');
+  if(!iH||!iS) return alert('Campos ausentes');
+  const h=iH.value, s=iS.value.trim();
+  if(!h||!s) return alert('Preencha hora e status');
+  const exists = PAUSAS_AGENDADAS.find(p=>p.hora===h);
+  if(exists && !confirm(`Já existe ${h}. Substituir?`)) return;
+  PAUSAS_AGENDADAS = PAUSAS_AGENDADAS.filter(p=>p.hora!==h);
+  PAUSAS_AGENDADAS.push({hora:h,status:s});
+  PAUSAS_AGENDADAS.sort((a,b)=>a.hora.localeCompare(b.hora));
+  save(STORAGE.PAUSAS, PAUSAS_AGENDADAS);
+  iH.value=''; iS.value='';
+  renderizarAgendamentos();
+  alert('Horário salvo! Reinicie a automação.');
+}
+
+function removerHorario(idx){ if(idx<0||idx>=PAUSAS_AGENDADAS.length) return; if(!confirm('Remover?')) return; PAUSAS_AGENDADAS.splice(idx,1); save(STORAGE.PAUSAS, PAUSAS_AGENDADAS); renderizarAgendamentos(); alert('Removido! Reinicie a automação.'); }
+
+function importarConfiguracoes(){
+  const inp = document.getElementById('import-file-input'); if(inp) inp.click();
+}
+function handleArquivoImportado(e){
+  const f = e.target.files[0]; if(!f) return;
+  const r = new FileReader();
+  r.onload = function(ev){
+    try{
+      const c = JSON.parse(ev.target.result);
+      if(c.pausas){ save(STORAGE.PAUSAS, c.pausas); save(STORAGE.NOTIF, c.notificacoes||configNotificacao); save(STORAGE.POS_MAIN, c.posicoes?.main); save(STORAGE.POS_CFG, c.posicoes?.config); alert('Importado! Recarregue a automação.'); }
+      else alert('Arquivo inválido');
+    }catch(err){ alert('Arquivo inválido'); }
+  };
+  r.readAsText(f);
+}
+/* ---------- UI / DRAG (V51.2 - pointer + inertia + overlay) ---------- */
+function criarDragOverlay(){
+  if(document.getElementById('pausa-script-drag-overlay')) return;
+  const o=document.createElement('div');
+  o.id='pausa-script-drag-overlay';
+  o.style.cssText='position:fixed;top:0;left:0;width:100vw;height:100vh;z-index:2147483645;display:none;cursor:grabbing;';
+  document.body.appendChild(o);
+  return o;
+}
+function salvarPos(elKey, el){
+  try{
+    if(!el) return;
+    let obj={};
+    if(el.style.top && el.style.left){ obj={top:el.style.top,left:el.style.left}; }
+    else { const r=el.getBoundingClientRect(); obj={bottom:'30px',right:'30px'}; }
+    save(elKey, obj);
+  }catch(e){}
+}
+function carregarPos(elKey){ try{ return load(elKey); }catch(e){return null;} }
+
+/* drag otimizado (pointer events + rAF + inertia) */
+function setupGPUDrag(elementId, headerId, storageKey){
+  const el=document.getElementById(elementId), hdr=document.getElementById(headerId), ic=document.getElementById('pausa-script-icone'), overlay=document.getElementById('pausa-script-drag-overlay');
+  if(!el||!hdr||!overlay) return;
+  let dragging=false, startX=0, startY=0, initL=0, initT=0, curX=0, curY=0, lastX=0, lastY=0, lastT=0, vx=0, vy=0, moved=false, raf=null;
+  const THRESH=6, FRICTION=0.92, MIN_V=0.3;
+
+  function setNoSelect(flag){ document.documentElement.style.userSelect=flag?'none':''; document.documentElement.style.touchAction=flag?'none':''; }
+
+  function onDown(e){
+    if(!hdr.contains(e.target) && !(ic&&ic.contains(e.target))) return;
+    e.preventDefault();
+    dragging=true; moved=false;
+    startX=e.clientX; startY=e.clientY;
+    lastX=e.clientX; lastY=e.clientY; lastT=performance.now();
+    const rect=el.getBoundingClientRect(); initL=rect.left; initT=rect.top;
+    el.style.left=initL+'px'; el.style.top=initT+'px'; el.style.transition='none'; el.style.transform='none';
+    overlay.style.display='block'; setNoSelect(true);
+    document.addEventListener('pointermove', onMove, {passive:false}); document.addEventListener('pointerup', onUp,{passive:false}); document.addEventListener('pointercancel', onUp,{passive:false});
+  }
+  function onMove(e){
+    if(!dragging) return;
+    e.preventDefault();
+    const now=performance.now(), dt=Math.max(1, now-lastT);
+    const dx=e.clientX-lastX, dy=e.clientY-lastY;
+    vx = (dx/dt)*16.6; vy=(dy/dt)*16.6;
+    lastX=e.clientX; lastY=e.clientY; lastT=now;
+    curX = e.clientX - startX; curY = e.clientY - startY;
+    if(!moved && (Math.abs(curX)>THRESH||Math.abs(curY)>THRESH)) moved=true;
+    if(raf) cancelAnimationFrame(raf);
+    raf = requestAnimationFrame(()=>{ el.style.transform = `translate3d(${curX}px,${curY}px,0)`; });
+  }
+  function animateInertia(){
+    vx *= FRICTION; vy *= FRICTION;
+    curX += vx; curY += vy;
+    let left = initL + curX, top = initT + curY;
+    const maxL = Math.max(0, window.innerWidth - el.offsetWidth), maxT = Math.max(0, window.innerHeight - el.offsetHeight);
+    left = Math.max(0, Math.min(left, maxL)); top = Math.max(0, Math.min(top, maxT));
+    el.style.transform = 'none';
+    el.style.left = left+'px'; el.style.top = top+'px';
+    if(Math.hypot(vx,vy) > MIN_V){
+      requestAnimationFrame(animateInertia);
+    } else {
+      el.style.transition='left 140ms ease-out, top 140ms ease-out';
+      salvarPos(storageKey, el);
+      overlay.style.display='none';
+      setNoSelect(false);
+      globalWasDragging = moved;
+      setTimeout(()=> globalWasDragging=false, 140);
+    }
+  }
+  function onUp(e){
+    if(!dragging) return;
+    dragging=false;
+    document.removeEventListener('pointermove', onMove); document.removeEventListener('pointerup', onUp); document.removeEventListener('pointercancel', onUp);
+    overlay.style.display='block';
+    if(!moved){
+      overlay.style.display='none'; setNoSelect(false); globalWasDragging=false; return;
+    }
+    // start inertia
+    animateInertia();
+  }
+  hdr.addEventListener('pointerdown', onDown);
+  if(ic) ic.addEventListener('pointerdown', onDown);
+  el.setAttribute('tabindex','0');
+}
+
+/* ---------- UI RENDER ---------- */
+function renderizarAgendamentos(){
+  const l=document.getElementById('agendamento-lista'); if(!l) return; l.innerHTML='';
+  if(!PAUSAS_AGENDADAS || PAUSAS_AGENDADAS.length===0){ l.innerHTML='<p style="color:#999">Nenhum horário agendado.</p>'; return; }
+  PAUSAS_AGENDADAS.forEach((p,idx)=>{
+    const item=document.createElement('div'); item.style.cssText='display:flex;justify-content:space-between;padding:6px;border-bottom:1px dashed rgba(255,255,255,0.08);font-size:12px';
+    const left=document.createElement('div'); left.innerHTML=`<strong>${p.hora}</strong> ${p.status}`; const right=document.createElement('div');
+    const e=document.createElement('button'); e.textContent='✏️'; e.onclick=()=>{ document.getElementById('novo-horario-hora').value=p.hora; document.getElementById('novo-horario-status').value=p.status; };
+    const r=document.createElement('button'); r.textContent='❌'; r.onclick=()=> removerHorario(idx);
+    right.appendChild(e); right.appendChild(r); item.appendChild(left); item.appendChild(right); l.appendChild(item);
+  });
+}
+function renderizarHistoricoLog(){
+  const l=document.getElementById('historico-log'); if(!l) return; l.innerHTML='';
+  if(!historicoPausas.length){ l.innerHTML='<p style="color:#999">Nenhum registro.</p>'; return; }
+  [...historicoPausas].reverse().forEach(p=>{ const d=document.createElement('div'); d.style.cssText='padding:6px;border-bottom:1px dashed rgba(255,255,255,0.06);font-size:12px'; d.innerHTML=`<strong>${p.tipo}</strong>: ${p.inicio} às ${p.fim} <span style="color:#0ff">(Dur: ${p.duracao})</span>`; l.appendChild(d); });
+}
+function renderizarEstatisticas(){
+  const s=document.getElementById('estatisticas-pausas'); if(!s) return; s.innerHTML=''; if(!historicoPausas.length){ s.innerHTML='<p style="color:#999">Sem estatísticas.</p>'; return; }
+  const map={}; historicoPausas.forEach(p=>{ if(!map[p.tipo]) map[p.tipo]={c:0,s:0}; map[p.tipo].c++; map[p.tipo].s += secFromHMS(p.duracao); });
+  const keys=Object.keys(map).sort(); keys.forEach(k=>{ const row=document.createElement('div'); row.style.cssText='display:flex;justify-content:space-between;padding:4px;font-size:12px'; row.innerHTML=`<strong>${k} (x${map[k].c})</strong><span>${formatDur(map[k].s)}</span>`; s.appendChild(row); });
+}
+
+/* ---------- UI CREATION (compact) ---------- */
+function criarUI(){
+  const id='pausa-script-container'; const old=document.getElementById(id); if(old) old.remove();
+  const c=document.createElement('div'); c.id=id;
+  const p = load(STORAGE.POS_MAIN);
+  const posCss = p ? (p.top?`top:${p.top};left:${p.left};`:`bottom:${p.bottom};right:${p.right};`) : 'bottom:30px;right:30px;';
+  c.style.cssText = `${posCss}position:fixed;z-index:2147483647;padding:8px;border-radius:10px;background:linear-gradient(145deg,#191b21,#23232a);color:#e0e0e0;box-shadow:0 8px 20px rgba(0,0,0,.5);cursor:grab;user-select:none;`;
+  c.innerHTML = `
+    <div id="pausa-script-icone" style="display:flex;align-items:center;gap:8px;cursor:grab"><span id="pausa-script-clock-dot" style="display:none;width:8px;height:8px;border-radius:50%"></span><span id="top-bar-time">--:--:--</span></div>
+    <div id="pausa-script-conteudo" style="display:none;width:320px;padding-top:8px">
+      <div id="pausa-script-header" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <h3 style="margin:0;color:#0ff;font-size:14px">🛠️ Gerenciador</h3>
+        <div style="display:flex;gap:8px;align-items:center"><span id="pausa-script-header-clock" style="font-family:monospace;color:#f1fa8c">--:--:--</span><span id="btn-abrir-config" style="cursor:pointer">⚙️</span><span id="btn-minimizar" style="cursor:pointer;color:#ff5555">[X]</span></div>
+      </div>
+      <div id="status-display" style="margin-bottom:8px">Status: <strong id="current-status" style="color:#50fa7b">Disponível</strong></div>
+      <div style="display:flex;gap:8px;margin-bottom:8px"><button id="btn-toggle-agendamento" class="script-btn">Ligar Automação</button><button id="btn-pause-resume-agendamento" class="script-btn" style="display:none">Pausar ⏸️</button></div>
+      <div id="buttons-container" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
+        <button id="btn-disponivel" class="script-btn">🟢 Disponível</button><button id="btn-na-fila" class="script-btn">🎧 Na Fila</button>
+        <button id="btn-refeicao" class="script-btn">🍔 Refeição</button><button id="btn-descanso" class="script-btn">☕ Pausa auricular</button>
+        <button id="btn-pausa-out" class="script-btn">⛔ Pausa Out</button><button id="btn-treinamento" class="script-btn">📚 Treinamento</button>
+        <button id="btn-backoffice" class="script-btn">📁 Backoffice</button><button id="btn-feedback" class="script-btn">📝 Feedback</button>
+        <button id="btn-particular" class="script-btn">🔒 Particular</button><button id="btn-saude" class="script-btn">🩺 Saúde</button>
+      </div>
+      <div style="display:flex;gap:8px"><button id="btn-reuniao" class="script-btn">🧑‍🤝‍🧑 Reunião</button><button id="btn-logoff" class="script-btn">🚪 Fazer Logoff</button></div>
+    </div>
+  `;
+  document.body.appendChild(c);
+  criarDragOverlay();
+  setupGPUDrag('pausa-script-container','pausa-script-header',STORAGE.POS_MAIN);
+
+  c.addEventListener('click', (ev)=>{
+    if(globalWasDragging) return;
+    const t = ev.target.closest('button'), s = ev.target.closest('span#btn-minimizar, span#btn-abrir-config'), o = ev.target.closest('div#pausa-script-icone');
+    if(!t && !s && !o) return;
+    const conteudo = document.getElementById('pausa-script-conteudo');
+    if(o && conteudo && conteudo.style.display==='none'){ toggleVisibilidade(); return; }
+    const id = (t||s||o).id;
+    switch(id){
+      case'btn-na-fila': iniciarNaFila(false); break;
+      case'btn-refeicao': iniciarRefeicao(false); break;
+      case'btn-descanso': iniciarDescanso(false); break;
+      case'btn-pausa-out': iniciarPausaOut(false); break;
+      case'btn-disponivel': voltarDisponivel(false); break;
+      case'btn-logoff': realizarLogoff(false); break;
+      case'btn-treinamento': iniciarTreinamento(false); break;
+      case'btn-reuniao': iniciarReuniao(false); break;
+      case'btn-backoffice': iniciarBackoffice(false); break;
+      case'btn-feedback': iniciarFeedback(false); break;
+      case'btn-particular': iniciarParticular(false); break;
+      case'btn-saude': iniciarQuestoesSaude(false); break;
+      case'btn-toggle-agendamento': toggleAgendamento(); break;
+      case'btn-pause-resume-agendamento': togglePausaAutomacao(); break;
+      case'btn-minimizar': toggleVisibilidade(); break;
+      case'btn-abrir-config': toggleVisibilidadeConfig(); break;
+    }
+  });
+  // inicializar labels/estado
+  registrarPausa(estadoAtual.tipo);
+  adicionarAtalho();
+  setInterval(atualizarUI,1000);
+}
+
+/* ---------- restante UI de config (compact) ---------- */
+function criarUIConfiguracoes(){
+  const id='pausa-script-config-container'; const old=document.getElementById(id); if(old) old.remove();
+  const c=document.createElement('div'); c.id=id; document.body.appendChild(c);
+  const p = load(STORAGE.POS_CFG);
+  c.style.cssText = `${p? (p.top?`top:${p.top};left:${p.left};`:`bottom:${p.bottom};right:${p.right};`) : 'bottom:30px;right:340px;'}position:fixed;width:340px;z-index:2147483646;background:linear-gradient(145deg,#1b1f29,#23232a);color:#e0e0e0;padding:12px;border-radius:8px;display:none;max-height:80vh;overflow:auto;`;
+  c.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center"><h3 style="margin:0">⚙️ Config & Histórico</h3><span id="btn-fechar-config" style="cursor:pointer;color:#ff5555">[X]</span></div>
+    <div id="estatisticas-pausas" style="margin-top:8px"></div>
+    <details style="margin-top:8px"><summary>🔔 Notificações</summary>
+      <div style="display:flex;flex-direction:column;gap:6px;padding-top:8px">
+        <label><input type="checkbox" id="notif-ativadas"> Ativar visuais</label>
+        <label><input type="checkbox" id="notif-som"> Ativar som</label>
+        <label>Antecedência (s): <input type="number" id="notif-tempo" min="5" max="55" step="5" style="width:70px"></label>
+      </div>
+    </details>
+    <details open style="margin-top:8px"><summary>Editar Horários</summary>
+      <div id="agendamento-lista" style="max-height:150px;overflow:auto;margin-top:8px"></div>
+      <div style="display:flex;gap:6px;margin-top:8px"><input id="novo-horario-hora" type="time"><input id="novo-horario-status" placeholder="Ex: Refeição" style="flex:1"><button id="btn-adicionar-horario">+</button></div>
+      <input id="import-file-input" type="file" accept=".json" style="display:none">
+    </details>
+    <details style="margin-top:8px"><summary>Histórico</summary><div id="historico-log" style="max-height:150px;overflow:auto;margin-top:8px"></div></details>
+    <details style="margin-top:8px"><summary>Diagnóstico</summary><div style="margin-top:8px"><button id="btn-verificar-seletores">Verificar Seletores</button><div id="seletores-resultados" style="max-height:150px;overflow:auto;margin-top:8px"></div></div></details>
+    <div style="display:flex;gap:8px;margin-top:8px"><button id="btn-exportar-config">Exportar</button><button id="btn-importar-config">Importar</button></div>
+  `;
+  setupGPUDrag('pausa-script-config-container','pausa-script-config-header',STORAGE.POS_CFG);
+  c.querySelector('#btn-fechar-config').onclick = toggleVisibilidadeConfig;
+  c.querySelector('#btn-adicionar-horario').onclick = adicionarNovoHorario;
+  c.querySelector('#btn-verificar-seletores').onclick = verificarSeletoresEAtualizarUI;
+  c.querySelector('#btn-exportar-config').onclick = exportarConfiguracoes;
+  c.querySelector('#btn-importar-config').onclick = importarConfiguracoes;
+  const cN=document.getElementById('notif-ativadas'), cS=document.getElementById('notif-som'), iT=document.getElementById('notif-tempo');
+  if(cN) cN.checked = configNotificacao.ativadas; if(cS) cS.checked = configNotificacao.somAtivado; if(iT) iT.value = configNotificacao.antecedenciaSegundos;
+  function salvarNotif(){ configNotificacao.ativadas = !!cN.checked; configNotificacao.somAtivado = !!cS.checked; let t=parseInt(iT.value,10); if(isNaN(t)||t<5) t=5; if(t>55) t=55; configNotificacao.antecedenciaSegundos = t; save(STORAGE.NOTIF, configNotificacao); }
+  if(cN) cN.onchange = salvarNotif; if(cS) cS.onchange = salvarNotif; if(iT) iT.onchange = salvarNotif;
+  renderizarAgendamentos(); renderizarHistoricoLog(); renderizarEstatisticas();
+}
+
+/* ---------- UI HELPERS ---------- */
+function toggleVisibilidade(){
+  const c=document.getElementById('pausa-script-container'), o=document.getElementById('pausa-script-conteudo'), i=document.getElementById('pausa-script-icone');
+  if(!c||!o||!i) return;
+  if(o.style.display!=='none'){ o.style.display='none'; i.style.display='flex'; c.style.width='auto'; c.style.padding='6px'; c.style.cursor='grab'; }
+  else { o.style.display='block'; i.style.display='none'; c.style.width='320px'; c.style.padding='10px'; const h=c.querySelector('#pausa-script-header'); if(h) h.style.cursor='move'; if(!c.style.left){ const r=c.getBoundingClientRect(); c.style.left = r.left+'px'; c.style.top = r.top+'px'; } }
+}
+function toggleVisibilidadeConfig(){ const c=document.getElementById('pausa-script-config-container'); if(!c) return; c.style.display = (c.style.display==='block') ? 'none' : 'block'; if(c.style.display==='block'){ renderizarAgendamentos(); renderizarHistoricoLog(); renderizarEstatisticas(); } }
+
+/* ---------- DIAGNÓSTICO ---------- */
+function verificarSeletoresEAtualizarUI(){
+  const out=document.getElementById('seletores-resultados'); if(!out) return;
+  out.innerHTML = '<p style="color:#bbb">Verificando...</p>';
+  setTimeout(()=>{
+    let html='<ul style="list-style:none;padding:0">';
+    Object.keys(SELECTORES).forEach(k=>{ const s=SELECTORES[k]; const e=document.querySelector(s); const ok=!!e; html += `<li style="padding:4px;border-bottom:1px dashed rgba(255,255,255,0.04)"><strong>${k}</strong> <code>${s}</code> <span style="color:${ok?'#50fa7b':'#ff6b6b'}">${ok?'Ok':'Fail'}</span></li>`; });
+    html += '</ul>';
+    out.innerHTML = html;
+  },50);
+}
+
+/* ---------- UI STATS / UPDATE ---------- */
+function atualizarUI(){
+  const now=new Date(); const hh=now.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  const t = document.getElementById('top-bar-time'), h = document.getElementById('pausa-script-header-clock'), s = document.getElementById('current-status');
+  if(t) t.textContent = hh; if(h) h.textContent = hh;
+  if(s){ let extra=''; if(estadoAtual.ativa){ extra = ' ('+formatDur(Math.round((now - estadoAtual.inicio)/1000))+')'; } s.textContent = estadoAtual.tipo + extra; }
+}
+
+/* ---------- START ---------- */
+console.log('[GERENCIADOR V51.2] iniciando...');
+setTimeout(()=>{
+  try{
+    criarUI();
+    criarUIConfiguracoes();
+    renderizarAgendamentos();
+    document.addEventListener('click', desbloquearAudio, {once:true});
+  }catch(e){ console.error('[GERENCIADOR] erro init', e); }
+},900);
+
+/* ---------- funções antigas reutilizadas que ficaram no escopo (declarações rápidas) ---------- */
+function adicionarAtalho(){ document.addEventListener('keydown', e=>{ const c=e.ctrlKey||e.metaKey, s=e.shiftKey; if(document.activeElement && ['INPUT','TEXTAREA'].includes(document.activeElement.tagName)) return; if(c&&s&&e.key==='1'){ e.preventDefault(); toggleVisibilidade(); } }); }
+function renderizarAgendamentos(){} // placeholder - definido acima
+function renderizarHistoricoLog(){} // placeholder - definido acima
+function renderizarEstatisticas(){} // placeholder - definido acima
+
+// fim do IIFE
+})();

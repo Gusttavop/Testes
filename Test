@@ -1,0 +1,278 @@
+// =======================
+// V51.1 - DRAG MELHORADO
+// Suporte pointer events, rAF, inércia, snap, touch-friendly
+// =======================
+function setupGPUDrag(elementId, headerId, storageKey) {
+    const element = document.getElementById(elementId);
+    const header = document.getElementById(headerId);
+    const icone = document.getElementById('pausa-script-icone');
+    const overlay = document.getElementById('pausa-script-drag-overlay');
+
+    if (!element || !header || !overlay) return;
+
+    let dragging = false;
+    let startX = 0, startY = 0;
+    let initialLeft = 0, initialTop = 0;
+    let currentTranslateX = 0, currentTranslateY = 0;
+    let rafId = null;
+    let lastMoveTime = 0;
+    let lastClientX = 0, lastClientY = 0;
+    let velocityX = 0, velocityY = 0;
+    let hasMovedSignificantly = false;
+    const MOVE_THRESHOLD = 6; // px to consider as drag (slightly increased)
+    const FRICTION = 0.92; // 0..1, lower -> quicker stop
+    const MIN_VELOCITY = 0.2; // px/frame below which we stop inertia
+
+    // Disable text selection while dragging
+    function setUserSelectNone(flag) {
+        document.documentElement.style.userSelect = flag ? 'none' : '';
+        document.documentElement.style.touchAction = flag ? 'none' : '';
+    }
+
+    function getBoundedPosition(left, top) {
+        const maxLeft = Math.max(0, window.innerWidth - element.offsetWidth);
+        const maxTop = Math.max(0, window.innerHeight - element.offsetHeight);
+        const boundedLeft = Math.max(0, Math.min(left, maxLeft));
+        const boundedTop = Math.max(0, Math.min(top, maxTop));
+        return { boundedLeft, boundedTop };
+    }
+
+    // Apply transform efficiently via rAF
+    function applyTransform() {
+        element.style.transform = `translate3d(${currentTranslateX}px, ${currentTranslateY}px, 0)`;
+        rafId = null;
+    }
+
+    function scheduleTransform() {
+        if (rafId) return;
+        rafId = requestAnimationFrame(applyTransform);
+    }
+
+    function onPointerDown(e) {
+        // Only start drag if header or icon was pressed (same as before)
+        const isHeader = header.contains(e.target);
+        const isIcon = (icone && icone.contains(e.target) && icone.style.display !== 'none');
+        if (!isHeader && !isIcon) return;
+
+        // Ensure pointer capture so we continue receiving events (for elements that support it)
+        if (e.pointerId && element.setPointerCapture) {
+            try { element.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+        }
+
+        dragging = true;
+        hasMovedSignificantly = false;
+
+        startX = e.clientX;
+        startY = e.clientY;
+        lastClientX = e.clientX;
+        lastClientY = e.clientY;
+        lastMoveTime = performance.now();
+        velocityX = 0;
+        velocityY = 0;
+
+        // compute initial left/top from style or bounding rect
+        const rect = element.getBoundingClientRect();
+        initialLeft = rect.left;
+        initialTop = rect.top;
+
+        // Reset transforms and set left/top so we move using translate
+        element.style.transition = 'none';
+        element.style.left = `${initialLeft}px`;
+        element.style.top = `${initialTop}px`;
+        element.style.bottom = 'auto';
+        element.style.right = 'auto';
+        currentTranslateX = 0;
+        currentTranslateY = 0;
+        element.style.transform = '';
+
+        // Visual affordances
+        element.style.cursor = 'grabbing';
+        if (header) header.style.cursor = 'grabbing';
+        if (icone) icone.style.cursor = 'grabbing';
+
+        // Show overlay to block iframes
+        overlay.style.display = 'block';
+        setUserSelectNone(true);
+
+        // Listen to pointermove/pointerup on document to be resilient
+        document.addEventListener('pointermove', onPointerMove, { passive: false });
+        document.addEventListener('pointerup', onPointerUp, { passive: false });
+        document.addEventListener('pointercancel', onPointerUp, { passive: false });
+    }
+
+    function onPointerMove(e) {
+        if (!dragging) return;
+        e.preventDefault();
+
+        const now = performance.now();
+        const dt = Math.max(1, now - lastMoveTime); // ms
+        const dx = e.clientX - lastClientX;
+        const dy = e.clientY - lastClientY;
+
+        // Instantaneous velocity (px per ms), convert to px/frame-like by multiplying dt
+        velocityX = dx / dt * 16.67; // approximate px per 16.67ms frame
+        velocityY = dy / dt * 16.67;
+
+        lastClientX = e.clientX;
+        lastClientY = e.clientY;
+        lastMoveTime = now;
+
+        const totalDX = e.clientX - startX;
+        const totalDY = e.clientY - startY;
+
+        if (!hasMovedSignificantly) {
+            if (Math.abs(totalDX) > MOVE_THRESHOLD || Math.abs(totalDY) > MOVE_THRESHOLD) {
+                hasMovedSignificantly = true;
+            }
+        }
+
+        currentTranslateX = totalDX;
+        currentTranslateY = totalDY;
+        scheduleTransform();
+    }
+
+    function startInertiaAnimation() {
+        // Use a simple friction loop for inertia
+        function step() {
+            // apply velocity
+            currentTranslateX += velocityX;
+            currentTranslateY += velocityY;
+
+            // apply friction
+            velocityX *= FRICTION;
+            velocityY *= FRICTION;
+
+            // boundary check: if element would go out of viewport, clamp and reduce velocity
+            let left = initialLeft + currentTranslateX;
+            let top = initialTop + currentTranslateY;
+            const bounds = getBoundedPosition(left, top);
+            if (left < bounds.boundedLeft) {
+                left = bounds.boundedLeft;
+                currentTranslateX = left - initialLeft;
+                velocityX = -velocityX * 0.4;
+            } else if (left > bounds.boundedLeft) {
+                // nothing
+            }
+            if (top < bounds.boundedTop) {
+                top = bounds.boundedTop;
+                currentTranslateY = top - initialTop;
+                velocityY = -velocityY * 0.4;
+            } else if (top > bounds.boundedTop) {
+                // nothing
+            }
+
+            element.style.transform = `translate3d(${currentTranslateX}px, ${currentTranslateY}px, 0)`;
+
+            const speed = Math.hypot(velocityX, velocityY);
+            if (speed > MIN_VELOCITY) {
+                requestAnimationFrame(step);
+            } else {
+                // finalize position and save
+                const finalLeft = Math.round(initialLeft + currentTranslateX);
+                const finalTop = Math.round(initialTop + currentTranslateY);
+                const finalBounds = getBoundedPosition(finalLeft, finalTop);
+
+                // Snap to edges with small margin
+                const margin = 12;
+                let snapLeft = finalBounds.boundedLeft;
+                let snapTop = finalBounds.boundedTop;
+
+                // If close to edges, snap to them
+                if (Math.abs(finalLeft - 0) < margin) snapLeft = 0;
+                if (Math.abs(finalTop - 0) < margin) snapTop = 0;
+                if (Math.abs(finalLeft - (window.innerWidth - element.offsetWidth)) < margin) snapLeft = window.innerWidth - element.offsetWidth;
+                if (Math.abs(finalTop - (window.innerHeight - element.offsetHeight)) < margin) snapTop = window.innerHeight - element.offsetHeight;
+
+                element.style.transition = 'left 160ms ease-out, top 160ms ease-out';
+                element.style.transform = '';
+                element.style.left = snapLeft + 'px';
+                element.style.top = snapTop + 'px';
+
+                // small timeout to allow transition to end then remove transition style
+                setTimeout(() => { element.style.transition = ''; }, 200);
+
+                // Persist position
+                salvarPosicaoPainelLocalStorage(storageKey, element);
+
+                // reset cursors
+                element.style.cursor = 'default';
+                if (header) header.style.cursor = 'move';
+                if (icone && document.getElementById('pausa-script-conteudo') && document.getElementById('pausa-script-conteudo').style.display === 'none') {
+                    element.style.cursor = 'grab';
+                }
+
+                // clear overlay & selection lock
+                overlay.style.display = 'none';
+                setUserSelectNone(false);
+
+                // set global dragging flag for small time to avoid click
+                if (hasMovedSignificantly) {
+                    globalWasDragging = true;
+                    setTimeout(() => { globalWasDragging = false; }, 120);
+                }
+            }
+        }
+        requestAnimationFrame(step);
+    }
+
+    function onPointerUp(e) {
+        if (!dragging) return;
+
+        dragging = false;
+
+        // release pointer capture
+        if (e.pointerId && element.releasePointerCapture) {
+            try { element.releasePointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+        }
+
+        // stop listening
+        document.removeEventListener('pointermove', onPointerMove, { passive: false });
+        document.removeEventListener('pointerup', onPointerUp, { passive: false });
+        document.removeEventListener('pointercancel', onPointerUp, { passive: false });
+
+        // hide overlay only after inertia ends
+        overlay.style.display = 'block'; // keep while inertia runs
+
+        // compute final velocities (already computed during move)
+        // if small movement -> treat as click (no move)
+        const totalDX = e.clientX - startX;
+        const totalDY = e.clientY - startY;
+        if (!hasMovedSignificantly && Math.abs(totalDX) < MOVE_THRESHOLD && Math.abs(totalDY) < MOVE_THRESHOLD) {
+            // no real drag -> simply restore transform and allow click
+            element.style.transform = '';
+            overlay.style.display = 'none';
+            setUserSelectNone(false);
+            element.style.cursor = 'default';
+            if (header) header.style.cursor = 'move';
+            // small guard to avoid immediate click (but preserve normal click)
+            globalWasDragging = false;
+            return;
+        }
+
+        // else start inertia animation (may be tiny if velocities are small)
+        startInertiaAnimation();
+    }
+
+    // Attach pointerdown (better than mousedown for touch support)
+    header.addEventListener('pointerdown', onPointerDown);
+    if (icone) icone.addEventListener('pointerdown', onPointerDown);
+
+    // Accessibility: keyboard move with arrow keys + modifier (optional)
+    element.addEventListener('keydown', function(ev) {
+        if (document.activeElement !== element) return;
+        const step = ev.shiftKey ? 20 : 6;
+        let moved = false;
+        if (ev.key === 'ArrowLeft') { element.style.left = (parseInt(element.style.left || element.getBoundingClientRect().left,10) - step) + 'px'; moved = true; }
+        if (ev.key === 'ArrowRight') { element.style.left = (parseInt(element.style.left || element.getBoundingClientRect().left,10) + step) + 'px'; moved = true; }
+        if (ev.key === 'ArrowUp') { element.style.top = (parseInt(element.style.top || element.getBoundingClientRect().top,10) - step) + 'px'; moved = true; }
+        if (ev.key === 'ArrowDown') { element.style.top = (parseInt(element.style.top || element.getBoundingClientRect().top,10) + step) + 'px'; moved = true; }
+        if (moved) {
+            ev.preventDefault();
+            element.style.transition = 'left 80ms linear, top 80ms linear';
+            setTimeout(()=>{ element.style.transition = ''; salvarPosicaoPainelLocalStorage(storageKey, element); }, 120);
+        }
+    });
+
+    // ensure element can receive focus for keyboard dragging
+    element.setAttribute('tabindex', '0');
+}
